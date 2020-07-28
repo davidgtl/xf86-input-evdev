@@ -92,14 +92,22 @@
 #endif
 
 #define DELEGATE_FOLDER "/evdev_delegate_devices"
-#define SHMEM_BUFF_LENGTH (12 * 1024)
+#define SHMEM_BUFF_LENGTH (1024)
+
+typedef struct {
+    int device_identifier;
+    struct input_event ev;
+} SharedEvent;
 
 typedef struct {
     sem_t  server;
     sem_t  client;
     size_t current_pos;
-    unsigned char buffy[SHMEM_BUFF_LENGTH];
+    SharedEvent buffy[SHMEM_BUFF_LENGTH];
 } SharedMemoryStruct;
+
+static SharedMemoryStruct *shared_mem = NULL;
+static int shared_mem_fd = 0;
 
 /* Any of those triggers a proximity event */
 static int proximity_bits[] = {
@@ -1039,6 +1047,33 @@ EvdevHandleMTDevEvent(InputInfoPtr pInfo, struct input_event *ev) {
     }
 }
 
+static int DelegateEvent(EvdevPtr pEvdev, struct input_event* ev){
+
+    const struct timespec timeout = {0, 100000}; // 0.1ms
+    int sem_server_value;
+    sem_getvalue(&shared_mem->server, &sem_server_value);
+
+    if(sem_server_value > 0) // nobody's listening, continue with normal processing
+    {
+        return 0;
+    } //event not delegated
+
+    shared_mem->buffy[shared_mem->current_pos].ev = *ev;
+    shared_mem->buffy[shared_mem->current_pos].device_identifier = pEvdev->shared_device_identifier;
+
+    sem_post(&shared_mem->server); // notify client of event
+
+    if(sem_timedwait(&shared_mem->client, &timeout)) // wait for a timely reply
+        return 0; //too slow, event not delegated
+
+    shared_mem->current_pos++;
+
+    if(shared_mem->current_pos >= SHMEM_BUFF_LENGTH)
+        shared_mem->current_pos = 0;
+
+    return 1; // Event delegated
+}
+
 static void
 EvdevReadInput(InputInfoPtr pInfo) {
     int rc = 0;
@@ -1055,6 +1090,10 @@ EvdevReadInput(InputInfoPtr pInfo) {
                                       strerror(-rc));
             break;
         } else if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
+
+            if(DelegateEvent(pEvdev, &ev))
+                continue;
+
             if (pEvdev->mtdev)
                 EvdevHandleMTDevEvent(pInfo, &ev);
             else
@@ -2586,9 +2625,6 @@ EVDEV = {
 #endif
 };
 
-static SharedMemoryStruct *shared_mem = NULL;
-static int shared_mem_fd = 0;
-
 
 static int DestroySharedMemory(void) {
     sem_destroy(&shared_mem->server);
@@ -2612,8 +2648,8 @@ static int CreateSharedMemory(void) {
     }
 
     rc = ftruncate(shared_mem_fd, sizeof(SharedMemoryStruct));
-    if(rc != 0){
-        xf86Msg(X_WARNING, "SMemory  with error %s\n", strerror(errno));
+    if(rc < 0){
+        xf86Msg(X_WARNING, "Shared memory failed to be resized with error %s\n", strerror(errno));
         return errno;
     }
     shared_mem = (SharedMemoryStruct *) mmap(NULL, sizeof(SharedMemoryStruct), PROT_READ|PROT_WRITE, MAP_SHARED, shared_mem_fd, 0);
@@ -2625,7 +2661,7 @@ static int CreateSharedMemory(void) {
     else
         xf86Msg(X_INFO, "Shared memory allocated successfully at %s\n", shmem_path);
 
-    if (sem_init(&shared_mem->server, 1, 0) == -1) {
+    if (sem_init(&shared_mem->server, 1, 1) == -1) {
         xf86Msg(X_WARNING, "Server semaphore initialization failed\n");
         return 1;
     }
@@ -2634,13 +2670,13 @@ static int CreateSharedMemory(void) {
         return 1;
     }
 
+    rc = mkdir("/del_dev", 0777);
+    if(rc < 0 && errno != EEXIST){
+        xf86Msg(X_WARNING, "mkdir /del_dev failed\n");
+        return 1;
+    }
 
-    shared_mem->buffy[0] = 'H';
-    shared_mem->buffy[1] = 'e';
-    shared_mem->buffy[2] = 'l';
-    shared_mem->buffy[3] = 'l';
-    shared_mem->buffy[4] = 'o';
-    shared_mem->buffy[5] = '\0';
+    xf86Msg(X_INFO, "Shared memory created.\n");
 
     return 0;
  /*

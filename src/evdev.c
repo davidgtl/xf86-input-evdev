@@ -96,7 +96,7 @@
 
 typedef struct {
     int device_identifier;
-    bool delegated;
+    u_char delegated;
     struct input_event ev;
 } SharedEvent;
 

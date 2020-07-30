@@ -159,7 +159,8 @@ typedef struct {
     char *device;
 
     /* External event delegation */
-    int shared_device_identifier; //TODO: generate me and write me to info
+    int shared_device_identifier;
+    int fd_device_descriptor;
 
     int grabDevice;         /* grab the event device? */
 

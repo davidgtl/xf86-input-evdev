@@ -96,18 +96,20 @@
 
 typedef struct {
     int device_identifier;
+    bool delegated;
     struct input_event ev;
 } SharedEvent;
 
 typedef struct {
-    sem_t  server;
-    sem_t  client;
+    sem_t server;
+    sem_t client;
     size_t current_pos;
     SharedEvent buffy[SHMEM_BUFF_LENGTH];
 } SharedMemoryStruct;
 
 static SharedMemoryStruct *shared_mem = NULL;
 static int shared_mem_fd = 0;
+static int del_dev_identifier = 1;
 
 /* Any of those triggers a proximity event */
 static int proximity_bits[] = {
@@ -1047,31 +1049,34 @@ EvdevHandleMTDevEvent(InputInfoPtr pInfo, struct input_event *ev) {
     }
 }
 
-static int DelegateEvent(EvdevPtr pEvdev, struct input_event* ev){
+static int DelegateEvent(EvdevPtr pEvdev, struct input_event *ev) {
 
-    const struct timespec timeout = {0, 100000}; // 0.1ms
+    int rc;
+    const struct timespec timeout = {0, 1000000}; // 1ms
     int sem_server_value;
     sem_getvalue(&shared_mem->server, &sem_server_value);
 
-    if(sem_server_value > 0) // nobody's listening, continue with normal processing
-    {
-        return 0;
-    } //event not delegated
+    if (sem_server_value > 0) // nobody's listening, continue with normal processing
+        return 0; //event not delegated
 
     shared_mem->buffy[shared_mem->current_pos].ev = *ev;
     shared_mem->buffy[shared_mem->current_pos].device_identifier = pEvdev->shared_device_identifier;
 
     sem_post(&shared_mem->server); // notify client of event
 
-    if(sem_timedwait(&shared_mem->client, &timeout)) // wait for a timely reply
+    if (sem_timedwait(&shared_mem->client, &timeout)) // wait for a timely reply
         return 0; //too slow, event not delegated
+
+    rc = 0;
+    if (shared_mem->buffy[shared_mem->current_pos].delegated)
+        rc = 1; // Event delegated
 
     shared_mem->current_pos++;
 
-    if(shared_mem->current_pos >= SHMEM_BUFF_LENGTH)
+    if (shared_mem->current_pos >= SHMEM_BUFF_LENGTH)
         shared_mem->current_pos = 0;
 
-    return 1; // Event delegated
+    return rc;
 }
 
 static void
@@ -1091,7 +1096,7 @@ EvdevReadInput(InputInfoPtr pInfo) {
             break;
         } else if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
 
-            if(DelegateEvent(pEvdev, &ev))
+            if (DelegateEvent(pEvdev, &ev))
                 continue;
 
             if (pEvdev->mtdev)
@@ -1116,6 +1121,8 @@ EvdevPtrCtrlProc(DeviceIntPtr device, PtrCtrl *ctrl) {
     /* Nothing to do, dix handles all settings */
 }
 
+/* Set LEDs state */
+// TODO: enable delegate to write led state
 static void
 EvdevKbdCtrl(DeviceIntPtr device, KeybdCtrl *ctrl) {
     static struct {
@@ -2090,6 +2097,37 @@ EvdevForceXY(InputInfoPtr pInfo, int mode) {
     }
 }
 
+static int CreateDescriptorFile(InputInfoPtr pInfo) {
+    const char folder_del_dev[] = "/del_dev";
+    const char folder_del_dev_input[] = "/del_dev/input";
+    char device_descriptor_path[255];
+    struct stat sb;
+
+    EvdevPtr pEvdev = pInfo->private;
+
+    if (!(stat(folder_del_dev, &sb) == 0 && S_ISDIR(sb.st_mode)))
+        mkdir(folder_del_dev, 0777);
+
+    if (!(stat(folder_del_dev_input, &sb) == 0 && S_ISDIR(sb.st_mode)))
+        mkdir(folder_del_dev_input, 0777);
+
+    pEvdev->shared_device_identifier = del_dev_identifier;
+    sprintf(device_descriptor_path, "%s/%d", folder_del_dev_input, del_dev_identifier);
+    pEvdev->fd_device_descriptor = open(device_descriptor_path, O_WRONLY | O_CREAT, 0660);
+
+    if (pEvdev->fd_device_descriptor < 0) {
+        xf86IDrvMsg(pInfo, X_WARNING, "%s could not be opened\n", device_descriptor_path);
+        return 1;
+    }
+
+    xf86IDrvMsg(pInfo, X_INFO, "%s descriptor created\n", device_descriptor_path);
+
+    del_dev_identifier++;
+
+    return 0;
+
+}
+
 static int
 EvdevProbe(InputInfoPtr pInfo) {
     int i, has_rel_axes, has_abs_axes, has_keys, num_buttons, has_scroll;
@@ -2098,10 +2136,20 @@ EvdevProbe(InputInfoPtr pInfo) {
     int ignore_abs = 0, ignore_rel = 0;
     EvdevPtr pEvdev = pInfo->private;
     int rc = 1;
+    int vendor_id, product_id;
 
-    xf86IDrvMsg(pInfo, X_PROBED, "Vendor %#hx Product %#hx\n",
-                libevdev_get_id_vendor(pEvdev->dev),
-                libevdev_get_id_product(pEvdev->dev));
+    vendor_id = libevdev_get_id_vendor(pEvdev->dev);
+    product_id = libevdev_get_id_product(pEvdev->dev);
+
+    dprintf(pEvdev->fd_device_descriptor, "Name:%s\n", libevdev_get_name(pEvdev->dev));
+    dprintf(pEvdev->fd_device_descriptor, "Unique:%s\n", libevdev_get_uniq(pEvdev->dev));
+    dprintf(pEvdev->fd_device_descriptor, "Vendor:%d\nProduct:%d\n", vendor_id, product_id);
+    dprintf(pEvdev->fd_device_descriptor, "Logical location:%s\n", pEvdev->device);
+    dprintf(pEvdev->fd_device_descriptor, "Physical location:%s\n", libevdev_get_phys(pEvdev->dev));
+    dprintf(pEvdev->fd_device_descriptor, "Bus type:%d\n", libevdev_get_id_bustype(pEvdev->dev));
+    dprintf(pEvdev->fd_device_descriptor, "Firmware version:%d\n", libevdev_get_id_version(pEvdev->dev));
+
+    xf86IDrvMsg(pInfo, X_PROBED, "Vendor %#hx Product %#hx\n", vendor_id, product_id);
 
     /* Trinary state for ignoring axes:
        - unset: do the normal thing.
@@ -2582,6 +2630,8 @@ EvdevPreInit(InputDriverPtr drv, InputInfoPtr pInfo, int flags) {
         goto error;
     }
 
+    CreateDescriptorFile(pInfo);
+
     EvdevInitButtonMapping(pInfo);
 
     if (EvdevCache(pInfo) || EvdevProbe(pInfo)) {
@@ -2641,24 +2691,24 @@ static int CreateSharedMemory(void) {
 
     xf86Msg(X_INFO, "Creating shared memory...\n");
 
-    shared_mem_fd = shm_open(shmem_path, O_RDWR | O_CREAT, 0644 );
+    shared_mem_fd = shm_open(shmem_path, O_RDWR | O_CREAT, 0644);
     if (shared_mem_fd < 0) {
         xf86Msg(X_WARNING, "Shared memory creation failed with error %s\n", strerror(errno));
         return errno;
     }
 
     rc = ftruncate(shared_mem_fd, sizeof(SharedMemoryStruct));
-    if(rc < 0){
+    if (rc < 0) {
         xf86Msg(X_WARNING, "Shared memory failed to be resized with error %s\n", strerror(errno));
         return errno;
     }
-    shared_mem = (SharedMemoryStruct *) mmap(NULL, sizeof(SharedMemoryStruct), PROT_READ|PROT_WRITE, MAP_SHARED, shared_mem_fd, 0);
+    shared_mem = (SharedMemoryStruct *) mmap(NULL, sizeof(SharedMemoryStruct), PROT_READ | PROT_WRITE, MAP_SHARED,
+                                             shared_mem_fd, 0);
 
-    if(shared_mem == NULL) {
+    if (shared_mem == NULL) {
         xf86Msg(X_WARNING, "Shared memory allocation failed with error %s\n", strerror(errno));
         return errno;
-    }
-    else
+    } else
         xf86Msg(X_INFO, "Shared memory allocated successfully at %s\n", shmem_path);
 
     if (sem_init(&shared_mem->server, 1, 1) == -1) {
@@ -2670,55 +2720,9 @@ static int CreateSharedMemory(void) {
         return 1;
     }
 
-    rc = mkdir("/del_dev", 0777);
-    if(rc < 0 && errno != EEXIST){
-        xf86Msg(X_WARNING, "mkdir /del_dev failed\n");
-        return 1;
-    }
-
     xf86Msg(X_INFO, "Shared memory created.\n");
 
     return 0;
- /*
-    EvdevPtr pEvdev = pInfo->private;
-
-    pEvdev->delegate_device = calloc(64, 1);
-    if (!pEvdev->delegate_device)
-        return 1;
-
-
-    char del_event_folder[] = DELEGATE_FOLDER;
-    char del_info_folder[] = DELEGATE_INFO_FOLDER;
-    char *full_del_path = pEvdev->delegate_device;
-    char *full_device_name = pEvdev->device;
-
-
-
-    xf86IDrvMsg(pInfo, X_INFO, full_device_name);
-    xf86IDrvMsg(pInfo, X_INFO, "Applying David's Mac sauce...");
-
-    int cch, lch;
-    for (cch = 0, lch = 0; full_device_name[cch] != '\0'; cch++)
-        if (full_device_name[cch] == '/')
-            lch = cch + 1;
-
-    //copy folder path into full path
-    for (cch = 0; cch < sizeof(del_event_folder); cch++)
-        full_del_path[cch] = del_event_folder[cch];
-
-    // copy just device name(e.g. "event5"/"mouse1") into full path
-    for (cch = lch; full_device_name[cch] != '\0'; cch++)
-        full_del_path[cch - lch + sizeof(del_event_folder) - 1] = full_device_name[cch];
-
-    full_del_path[cch] = '\0';
-
-    mkfifo(full_del_path, 0666);
-    int del_events = open(full_del_path, O_WRONLY | O_NONBLOCK);
-
-
-    int del_info = open(full_del_path, O_WRONLY | O_CREAT, 0644);
-    return 0;
-    */
 }
 
 static void

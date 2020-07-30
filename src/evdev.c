@@ -2106,14 +2106,14 @@ static int CreateDescriptorFile(InputInfoPtr pInfo) {
     EvdevPtr pEvdev = pInfo->private;
 
     if (!(stat(folder_del_dev, &sb) == 0 && S_ISDIR(sb.st_mode)))
-        mkdir(folder_del_dev, 0777);
+        mkdir(folder_del_dev, 0775);
 
     if (!(stat(folder_del_dev_input, &sb) == 0 && S_ISDIR(sb.st_mode)))
-        mkdir(folder_del_dev_input, 0777);
+        mkdir(folder_del_dev_input, 0775);
 
     pEvdev->shared_device_identifier = del_dev_identifier;
     sprintf(device_descriptor_path, "%s/%d", folder_del_dev_input, del_dev_identifier);
-    pEvdev->fd_device_descriptor = open(device_descriptor_path, O_WRONLY | O_CREAT, 0660);
+    pEvdev->fd_device_descriptor = open(device_descriptor_path, O_WRONLY | O_CREAT, 0670);
 
     if (pEvdev->fd_device_descriptor < 0) {
         xf86IDrvMsg(pInfo, X_WARNING, "%s could not be opened\n", device_descriptor_path);

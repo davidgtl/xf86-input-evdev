@@ -109,7 +109,7 @@ typedef struct {
 
 static SharedMemoryStruct *shared_mem = NULL;
 static int shared_mem_fd = 0;
-static int del_dev_identifier = 1;
+static int del_dev_identifier = 64; // event devices go upt to 31 according to linux Documentation/input/input.txt
 
 /* Any of those triggers a proximity event */
 static int proximity_bits[] = {
@@ -2098,10 +2098,12 @@ EvdevForceXY(InputInfoPtr pInfo, int mode) {
 }
 
 static int CreateDescriptorFile(InputInfoPtr pInfo) {
+    const char expected_path[] = "/dev/input/event";
     const char folder_del_dev[] = "/del_dev";
     const char folder_del_dev_input[] = "/del_dev/input";
-    char device_descriptor_path[255];
     struct stat sb;
+    int i;
+    char is_expected_path = 1;
 
     EvdevPtr pEvdev = pInfo->private;
 
@@ -2111,21 +2113,37 @@ static int CreateDescriptorFile(InputInfoPtr pInfo) {
     if (!(stat(folder_del_dev_input, &sb) == 0 && S_ISDIR(sb.st_mode)))
         mkdir(folder_del_dev_input, 0775);
 
-    pEvdev->shared_device_identifier = del_dev_identifier;
-    sprintf(device_descriptor_path, "%s/%d", folder_del_dev_input, del_dev_identifier);
-    pEvdev->fd_device_descriptor = open(device_descriptor_path, O_WRONLY | O_CREAT, 0670);
+    for (i = 0; i < sizeof(expected_path); i++) {
+        if(pEvdev->device[i] != expected_path[i]){
+            is_expected_path = 0;
+            break;
+        }
+    }
+
+    if(is_expected_path)
+        pEvdev->shared_device_identifier = atoi(pEvdev->device + sizeof(expected_path));
+    else
+        pEvdev->shared_device_identifier = del_dev_identifier++;
+
+    sprintf(pEvdev->descriptor_path, "%s/%d", folder_del_dev_input, pEvdev->shared_device_identifier);
+    pEvdev->fd_device_descriptor = open(pEvdev->descriptor_path, O_WRONLY | O_CREAT, 0664);
 
     if (pEvdev->fd_device_descriptor < 0) {
-        xf86IDrvMsg(pInfo, X_WARNING, "%s could not be opened\n", device_descriptor_path);
+        xf86IDrvMsg(pInfo, X_WARNING, "%s could not be opened\n", pEvdev->descriptor_path);
         return 1;
     }
 
-    xf86IDrvMsg(pInfo, X_INFO, "%s descriptor created\n", device_descriptor_path);
+    xf86IDrvMsg(pInfo, X_INFO, "%s descriptor created\n", pEvdev->descriptor_path);
 
-    del_dev_identifier++;
 
     return 0;
+}
 
+static void DeleteDescriptorFile(InputInfoPtr pInfo) {
+    EvdevPtr pEvdev = pInfo->private;
+
+    close(pEvdev->fd_device_descriptor);
+    remove(pEvdev->descriptor_path);
 }
 
 static int
@@ -2549,6 +2567,7 @@ static void
 EvdevUnInit(InputDriverPtr drv, InputInfoPtr pInfo, int flags) {
     EvdevPtr pEvdev = pInfo ? pInfo->private : NULL;
     if (pEvdev) {
+        DeleteDescriptorFile(pInfo);
         /* Release string allocated in EvdevOpenDevice. */
         free(pEvdev->device);
         pEvdev->device = NULL;

@@ -161,6 +161,7 @@ typedef struct {
     /* External event delegation */
     int shared_device_identifier;
     int fd_device_descriptor;
+    char descriptor_path[64];
 
     int grabDevice;         /* grab the event device? */
 

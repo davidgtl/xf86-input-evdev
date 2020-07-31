@@ -2113,7 +2113,9 @@ static int CreateDescriptorFile(InputInfoPtr pInfo) {
     if (!(stat(folder_del_dev_input, &sb) == 0 && S_ISDIR(sb.st_mode)))
         mkdir(folder_del_dev_input, 0775);
 
-    for (i = 0; i < sizeof(expected_path); i++) {
+    for (i = 0; i < sizeof(expected_path) - 1; i++) {
+
+
         if(pEvdev->device[i] != expected_path[i]){
             is_expected_path = 0;
             break;
@@ -2121,7 +2123,7 @@ static int CreateDescriptorFile(InputInfoPtr pInfo) {
     }
 
     if(is_expected_path)
-        pEvdev->shared_device_identifier = atoi(pEvdev->device + sizeof(expected_path));
+        pEvdev->shared_device_identifier = atoi(pEvdev->device + sizeof(expected_path) - 1); //FIXME: te other branch is chosen
     else
         pEvdev->shared_device_identifier = del_dev_identifier++;
 
